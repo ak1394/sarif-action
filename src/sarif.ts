@@ -4,10 +4,7 @@
 */
 
 import * as url from "url";
-import { resolve } from "path";
-import { FileAuditMap } from "@xliic/cicd-core-node/lib/types";
-import TurndownService from "turndown";
-import got from "got";
+import scanReport from "./report";
 
 export interface Sarif {
   $schema?: string;
@@ -74,60 +71,13 @@ export interface Rule {
   };
 }
 
-const ARTICLES_URL = "https://platform.42crunch.com/kdb/audit-with-yaml.json";
-
-export async function getArticles(): Promise<any> {
-  try {
-    const response = await got(ARTICLES_URL);
-    const articles = JSON.parse(response.body);
-    return articles;
-  } catch (error) {
-    throw new Error(`Failed to read articles.json: ${error}`);
-  }
-}
-
 function getResultLevel(
-  issue
+  issue: any
 ): "notApplicable" | "pass" | "note" | "warning" | "error" | "open" {
-  const criticalityToSeverity = {
-    1: "note",
-    2: "note",
-    3: "warning",
-    4: "error",
-    5: "error",
-  };
-
-  return criticalityToSeverity[issue.criticality];
+  return "error";
 }
 
-const fallbackArticle = {
-  description: {
-    text: `<p>Whoops! Looks like there has been an oversight and we are missing a page for this issue.</p>
-             <p><a href="https://apisecurity.io/contact-us/">Let us know</a> the title of the issue, and we make sure to add it to the encyclopedia.</p>`,
-  },
-};
-
-function articleById(articles: any, id: string) {
-  function partToText(part) {
-    if (!part || !part.sections) {
-      return "";
-    }
-    return part.sections
-      .map((section) => `${section.text || ""}${section?.code?.json || ""}`)
-      .join("");
-  }
-
-  const article = articles[id] || fallbackArticle;
-
-  return [
-    article ? article.description.text : "",
-    partToText(article.example),
-    partToText(article.exploit),
-    partToText(article.remediation),
-  ].join("");
-}
-
-export async function produceSarif(summary: FileAuditMap): Promise<Sarif> {
+export async function produceSarif(): Promise<Sarif> {
   const sarifResults: Result[] = [];
   const sarifFiles = {};
 
@@ -136,10 +86,6 @@ export async function produceSarif(summary: FileAuditMap): Promise<Sarif> {
   let nextRuleIndex = 0;
   const sarifArtifactIndices = {};
   let nextArtifactIndex = 0;
-
-  const turndownService = new TurndownService();
-
-  const articles = await getArticles();
 
   const sarifLog: Sarif = {
     version: "2.1.0",
@@ -159,139 +105,68 @@ export async function produceSarif(summary: FileAuditMap): Promise<Sarif> {
     ],
   };
 
-  for (const filename of summary.keys()) {
-    const absoluteFile = resolve(filename);
-    const result = summary.get(filename)!;
-    if ("errors" in result) {
-      continue;
-    }
-
-    if (result.issues) {
-      for (const issue of result.issues) {
-        if (typeof sarifFiles[issue.file] === "undefined") {
-          sarifArtifactIndices[issue.file] = nextArtifactIndex++;
-          sarifFiles[issue.file] = {
-            location: {
-              uri: url.pathToFileURL(issue.file),
-            },
-          };
-        }
-
-        const sarifRepresentation: Result = {
-          level: getResultLevel(issue),
-          ruleId: issue.id,
-          message: {
-            text: issue.description,
+  for (const file of ["pixi3.yaml"]) {
+    // just a single file for now
+    for (const issue of scanReport.paths["/api/register"].post
+      .conformanceRequestIssues) {
+      const { test, outcome } = issue;
+      if (typeof sarifFiles[file] === "undefined") {
+        sarifArtifactIndices[file] = nextArtifactIndex++;
+        sarifFiles[file] = {
+          location: {
+            uri: url.pathToFileURL(file),
           },
-          locations: [
-            {
-              physicalLocation: {
-                artifactLocation: {
-                  uri: url.pathToFileURL(issue.file),
-                  index: sarifArtifactIndices[issue.file],
-                },
-                region: {
-                  startLine: issue.line,
-                  startColumn: 1,
-                },
-              },
-            },
-          ],
         };
-
-        sarifResults.push(sarifRepresentation);
-
-        if (typeof sarifRules[issue.id] === "undefined") {
-          sarifRuleIndices[issue.id] = nextRuleIndex++;
-
-          let helpUrl = "https://support.42crunch.com";
-          const article = articles[issue.id];
-          if (article) {
-            const version = issue.id.startsWith("v3-") ? "oasv3" : "oasv2";
-            const group = article.group;
-            const subgroup = article.subgroup;
-            helpUrl = `https://apisecurity.io/encyclopedia/content/${version}/${group}/${subgroup}/${issue.id}.htm`;
-          }
-
-          const helpText = turndownService.turndown(
-            articleById(articles, issue.id)
-          );
-
-          // Create a new entry in the rules dictionary.
-          sarifRules[issue.id] = {
-            id: issue.id,
-            shortDescription: {
-              text: issue.description,
-            },
-            helpUri: helpUrl, //meta.docs.url,
-            help: {
-              text: helpText,
-            },
-            properties: {
-              category: "Other", //meta.docs.category,
-            },
-          };
-        }
-
-        sarifRepresentation.ruleIndex = sarifRuleIndices[issue.id];
       }
-    }
 
-    /* Do not report failures for the time being
-    if (result.failures && result.failures.length > 0) {
-      for (let i = 0; i < result.failures.length; i++) {
-        const failure = result.failures[i];
-
-        // Only add it if not already there.
-        if (typeof sarifFiles[absoluteFile] === 'undefined') {
-          sarifArtifactIndices[absoluteFile] = nextArtifactIndex++;
-          sarifFiles[absoluteFile] = {
-            location: {
-              uri: url.pathToFileURL(absoluteFile),
-            },
-          };
-        }
-
-        const failureRuleId = `failure-${i}`;
-
-        const sarifRepresentation: Result = {
-          level: 'error',
-          ruleId: failureRuleId,
-          message: {
-            text: failure,
-          },
-          locations: [
-            {
-              physicalLocation: {
-                artifactLocation: {
-                  uri: url.pathToFileURL(absoluteFile),
-                  index: sarifArtifactIndices[absoluteFile],
-                },
+      const sarifRepresentation: Result = {
+        level: getResultLevel(issue),
+        ruleId: test.key,
+        message: {
+          text: test.description,
+        },
+        locations: [
+          {
+            physicalLocation: {
+              artifactLocation: {
+                uri: url.pathToFileURL(file),
+                index: sarifArtifactIndices[file],
+              },
+              region: {
+                startLine: 1, // FIXME use real file location
+                startColumn: 1,
               },
             },
-          ],
-        };
-
-        sarifResults.push(sarifRepresentation);
-
-        // each failure gets uinique rule
-        sarifRuleIndices[failureRuleId] = nextRuleIndex++;
-        sarifRules[failureRuleId] = {
-          id: failureRuleId,
-          shortDescription: {
-            text: failure,
           },
-          helpUri: 'http://support.42crunch.com', //meta.docs.url,
+        ],
+      };
+
+      sarifResults.push(sarifRepresentation);
+
+      if (typeof sarifRules[test.key] === "undefined") {
+        sarifRuleIndices[test.key] = nextRuleIndex++;
+
+        const helpUrl = "https://support.42crunch.com";
+        const helpText = "This is a sample entry for scan issue help";
+
+        // Create a new entry in the rules dictionary.
+        sarifRules[test.key] = {
+          id: test.key,
+          shortDescription: {
+            text: test.description,
+          },
+          helpUri: helpUrl, //meta.docs.url,
           help: {
-            text: failure,
+            text: helpText,
           },
           properties: {
-            category: 'Other', //meta.docs.category,
+            category: "Other", //meta.docs.category,
           },
         };
       }
+
+      sarifRepresentation.ruleIndex = sarifRuleIndices[test.key];
     }
-    */
   }
 
   if (Object.keys(sarifFiles).length > 0) {
